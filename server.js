@@ -147,19 +147,18 @@ function getOrCreateSession(sessionId) {
 
 // System prompt that defines chatbot personality and behavior
 const systemPrompt = `
-You are an experienced rancher with decades of hands-on experience who also happens to be an expert in solar pump systems. Your personality is authentic to publications like Beef Magazine, High Plains Journal, and American Cattlemen.
+You are an experienced water systems specialist who has spent decades working with ranchers and farmers across rural America. You have practical knowledge about livestock, water systems, and solar power.
 
 VOICE GUIDELINES:
-- Speak naturally like someone who's spent their life on working ranches and knows water systems inside and out
-- Use practical language with occasional industry terms that show your experience
-- Your humor is dry and sometimes sarcastic, but never over-the-top or stereotypical "cowboy"
-- You're knowledgeable about practical matters: grazing, weather patterns, cattle health, water systems
-- You occasionally mention seasonal ranch activities, markets, or weather that shows your experience
-- You're straightforward and no-nonsense, but friendly - like talking to someone at a farm store
-- You can lightly tease customers in a good-natured way if they seem receptive to humor
-- You're not a stereotype - you're a real person with knowledge and experience
+- Speak naturally and straightforwardly like someone with decades of field experience
+- Use precise technical terms when appropriate (e.g., "static water level," "drawdown," "TDH")
+- Mention practical considerations that show your experience (frost protection, seasonal challenges, maintenance concerns)
+- No affected speech patterns or stereotypical "cowboy talk" - just speak normally with occasional industry terminology
+- Be matter-of-fact but friendly, like a knowledgeable person at an agricultural supply store
+- Occasionally reference weather patterns, seasons, or other practical considerations that affect water systems
+- You can be slightly dry or sarcastic when appropriate, but subtly - real people don't announce their sarcasm
 
-You're helping customers size the right solar pump for their needs, whether for livestock, household, irrigation, or other uses. You ONLY recommend pumps from our product line, never competitors.
+You're helping customers size the right solar pump for their needs. You ONLY recommend pumps from our product line.
 
 INTERACTION APPROACH:
 - First determine what they're using water for, then adjust your questions accordingly
@@ -167,7 +166,7 @@ INTERACTION APPROACH:
 - Skip questions if they've already provided the information in earlier responses
 - If a customer knows their specific GPD (gallons per day) or TDH (total dynamic head) requirements, don't force them through all sizing questions
 - Be conversational and vary your question phrasing to sound natural
-- When they mention their location, share an interesting local fact about their area
+- When they mention their location, share an interesting historical fact about their area
 
 ALWAYS COLLECT THIS INFORMATION:
 1. Water usage purpose (livestock, household, irrigation, other)
@@ -193,11 +192,9 @@ CALCULATION BASICS:
 
 FINAL SUMMARY:
 Create a clean, organized summary of all specifications and recommendations that's easy to read and copy.
-
-Remember, you're helpful but authentic - a real rancher who knows pumps, not a caricature. Only use our own pump data for recommendations.
 `;
 
-// Main chat endpoint
+// Main chat endpoint with improved local fact handling
 app.post('/api/chat', async (req, res) => {
   try {
     const { message, sessionId } = req.body;
@@ -220,22 +217,32 @@ app.post('/api/chat', async (req, res) => {
     
     // Determine if we need to use Google search for this query
     let additionalInfo = "";
+    let localFactFound = false;
     
-    // Check if we need solar insolation data
+    // Check if we need solar insolation data and local facts
     if (session.currentStage === STAGES.LOCATION && session.data.location) {
+      console.log(`Processing location: ${session.data.location}`);
+      
       try {
         // Get solar data
         const solarData = await searchSolarInsolation(session.data.location);
         if (solarData) {
           additionalInfo = `\nSolar insolation data for ${session.data.location}: ${solarData}`;
+          console.log(`Found solar data: ${solarData}`);
         }
         
         // Get a local fact for conversation if we haven't shared one yet
         if (!session.hasSharedLocalFact) {
+          console.log("Attempting to get local fact...");
           const localFact = await searchLocalFact(session.data.location);
+          
           if (localFact) {
             additionalInfo += `\nInteresting local fact about ${session.data.location}: ${localFact}`;
             session.hasSharedLocalFact = true;
+            localFactFound = true;
+            console.log(`Found local fact: ${localFact}`);
+          } else {
+            console.log("No local fact found");
           }
         }
       } catch (error) {
@@ -255,12 +262,20 @@ app.post('/api/chat', async (req, res) => {
       }
     }
     
+    // Add explicit instructions for local facts if one was found
+    let factInstruction = "";
+    if (localFactFound) {
+      factInstruction = `The user is from ${session.data.location}. Share the interesting local fact I've provided in your response in a natural way.`;
+    }
+    
     // Generate response
     const response = await openai.chat.completions.create({
       model: "gpt-3.5-turbo", // Use standard model until we confirm this works
       messages: [
         { role: "system", content: systemPrompt },
         ...session.messages,
+        // Include local fact instruction if available
+        ...(factInstruction ? [{ role: "system", content: factInstruction }] : []),
         // Include sarcasm level guidance
         { role: "system", content: `Sarcasm level: ${session.data.sarcasticLevel}/10. Adjust your humor accordingly.` },
         // Include additional information if available
@@ -349,9 +364,7 @@ function processUserInput(session, message) {
   if (headMatch && !data.customHead) {
     data.customHead = parseInt(headMatch[1]);
     console.log(`Detected custom head: ${data.customHead}`);
-  }
-  
-  // Handle explicit usage type mentions
+  }// Handle explicit usage type mentions
   if (session.currentStage === STAGES.GREETING || session.currentStage === STAGES.USAGE_TYPE) {
     if (lowerMessage.includes('livestock') || 
         lowerMessage.includes('cattle') || 
@@ -693,10 +706,20 @@ async function searchSolarInsolation(location) {
   }
 }
 
-// Search for an interesting local fact about the location
+// Enhanced searchLocalFact function with debugging
 async function searchLocalFact(location) {
+  console.log(`Attempting to fetch local fact for: ${location}`);
+  
   try {
+    // Check if API keys exist
+    if (!googleSearchApiKey || !googleSearchEngineId) {
+      console.error('Missing Google Search API key or Search Engine ID');
+      return null;
+    }
+    
     const query = `interesting historical fact about ${location}`;
+    console.log(`Sending query: ${query}`);
+    
     const response = await axios.get('https://www.googleapis.com/customsearch/v1', {
       params: {
         key: googleSearchApiKey,
@@ -705,25 +728,51 @@ async function searchLocalFact(location) {
       }
     });
     
+    console.log(`Received response status: ${response.status}`);
+    
+    // Debug response data
+    if (response.data) {
+      console.log(`Response has ${response.data.items ? response.data.items.length : 0} items`);
+      
+      if (response.data.error) {
+        console.error('Google API error:', response.data.error);
+      }
+      
+      if (response.data.searchInformation) {
+        console.log(`Total results: ${response.data.searchInformation.totalResults}`);
+      }
+    }
+    
     if (response.data.items && response.data.items.length > 0) {
       // Get the most interesting snippet
       const snippets = response.data.items.slice(0, 3).map(item => item.snippet);
+      
+      console.log(`Got snippets: ${JSON.stringify(snippets)}`);
+      
       const filteredSnippets = snippets.filter(snippet => 
         !snippet.includes('weather') && 
         snippet.length > 40 && 
         snippet.split(' ').length > 8
       );
       
+      console.log(`Filtered to ${filteredSnippets.length} snippets`);
+      
       if (filteredSnippets.length > 0) {
+        console.log(`Returning snippet: ${filteredSnippets[0]}`);
         return filteredSnippets[0];
       }
       
+      console.log(`Returning default snippet: ${snippets[0]}`);
       return snippets[0];
     }
     
+    console.log('No items found in search results');
     return null;
   } catch (error) {
-    console.error('Google search error:', error);
+    console.error('Google search error details:', error.message);
+    if (error.response) {
+      console.error('Error response data:', error.response.data);
+    }
     return null;
   }
 }
@@ -752,272 +801,274 @@ async function searchPumpInformation(query) {
     console.error('Google search error:', error);
     return null;
   }
-}// Calculate friction loss for pipe
+}
+
+// Calculate friction loss for pipe
 function calculateFrictionLoss(flowRate, pipeLength, pipeSize) {
-    // Simplified friction loss calculation
-    const frictionFactor = 0.02; // Example factor, would vary by pipe material
-    return frictionFactor * (pipeLength / pipeSize) * (flowRate * flowRate);
-  }
+  // Simplified friction loss calculation
+  const frictionFactor = 0.02; // Example factor, would vary by pipe material
+  return frictionFactor * (pipeLength / pipeSize) * (flowRate * flowRate);
+}
+
+// Calculate total water requirements
+function calculateWaterRequirements(data) {
+  let dailyGallons = 0;
+  let requiredGPM = 0;
   
-  // Calculate total water requirements
-  function calculateWaterRequirements(data) {
-    let dailyGallons = 0;
-    let requiredGPM = 0;
-    
-    // If custom GPD was provided, use that
-    if (data.customGPD) {
-      dailyGallons = data.customGPD;
-    }
-    // Otherwise calculate based on usage type
-    else {
-      switch(data.usageType) {
-        case USAGE_TYPES.LIVESTOCK:
-          // Parse livestock type
-          let type = 'beef'; // Default
-          
-          if (data.livestockType && data.livestockType.toLowerCase().includes('dairy')) {
-            type = 'dairy';
-          } else if (data.livestockType && data.livestockType.toLowerCase().includes('horse')) {
-            type = 'horses';
-          } else if (data.livestockType && data.livestockType.toLowerCase().includes('goat')) {
-            type = 'goats';
-          } else if (data.livestockType && data.livestockType.toLowerCase().includes('sheep')) {
-            type = 'sheep';
-          }
-          
-          // Calculate for livestock
-          dailyGallons = livestockWaterNeeds[type].summer * (data.animalCount || 0);
-          break;
-          
-        case USAGE_TYPES.HOUSEHOLD:
-          // Calculate for household
-          dailyGallons = (data.peopleCount || 0) * householdWaterNeeds.person;
-          
-          // Add bathroom usage
-          if (data.bathroomCount) {
-            dailyGallons += data.bathroomCount * householdWaterNeeds.bathroom;
-          }
-          
-          // Add kitchen usage if mentioned
-          if (data.fixturesInfo && data.fixturesInfo.toLowerCase().includes('kitchen')) {
-            dailyGallons += householdWaterNeeds.kitchen;
-          }
-          
-          // Add laundry if mentioned
-          if (data.fixturesInfo && data.fixturesInfo.toLowerCase().includes('laundry')) {
-            dailyGallons += householdWaterNeeds.laundry;
-          }
-          
-          // Add garden if mentioned
-          if (data.fixturesInfo && data.fixturesInfo.toLowerCase().includes('garden')) {
-            if (data.fixturesInfo.toLowerCase().includes('large')) {
-              dailyGallons += householdWaterNeeds.garden_large;
-            } else if (data.fixturesInfo.toLowerCase().includes('medium')) {
-              dailyGallons += householdWaterNeeds.garden_medium;
-            } else {
-              dailyGallons += householdWaterNeeds.garden_small;
-            }
-          }
-          break;
-          
-        case USAGE_TYPES.IRRIGATION:
-          // Base calculation on irrigation method and area
-          let baseRate = irrigationWaterNeeds.sprinkler; // Default
-          
-          if (data.irrigationMethod === 'drip') {
-            baseRate = irrigationWaterNeeds.drip;
-          } else if (data.irrigationMethod === 'flood') {
-            baseRate = irrigationWaterNeeds.flood;
-          }
-          
-          // Apply crop type multiplier
-          let cropMultiplier = 1.0;
-          if (data.cropCategory === 'vegetables') {
-            cropMultiplier = irrigationWaterNeeds.vegetables;
-          } else if (data.cropCategory === 'fruits') {
-            cropMultiplier = irrigationWaterNeeds.fruits;
-          } else if (data.cropCategory === 'lawn') {
-            cropMultiplier = irrigationWaterNeeds.lawn;
-          }
-          
-          dailyGallons = baseRate * (data.irrigationArea || 1) * cropMultiplier;
-          break;
-          
-        default:
-          // Default to a reasonable value if we can't calculate
-          dailyGallons = 500;
-      }
-    }
-    
-    // Default peak sun hours if not found in search
-    let peakSunHours = 5.4;
-    
-    // Calculate required GPM
-    requiredGPM = dailyGallons / (peakSunHours * 60);
-    
-    return {
-      dailyGallons,
-      requiredGPM,
-      peakSunHours
-    };
+  // If custom GPD was provided, use that
+  if (data.customGPD) {
+    dailyGallons = data.customGPD;
   }
-  
-  // Calculate pump recommendation
-  function calculateRecommendation(data) {
-    // Calculate water requirements
-    const waterReq = calculateWaterRequirements(data);
-    
-    // Use custom head if provided
-    let tdh = data.customHead || 0;
-    
-    // If no custom head, calculate total dynamic head
-    if (!tdh) {
-      tdh = (data.staticWaterLevel || 0) + (data.drawdownLevel || 0) + (data.elevationGain || 0);
-      
-      // Add friction loss if pipe data exists
-      if (data.pipeLength && data.pipeSize) {
-        tdh += calculateFrictionLoss(waterReq.requiredGPM, data.pipeLength, data.pipeSize);
-      }
-    }
-    
-    // Check for sandy water
-    if (data.sandyWater) {
-      return {
-        isValid: false,
-        message: "Your water has too much sand for our solar pumps. You might want to consider contacting us directly for alternatives."
-      };
-    }
-    
-    // Check well casing size
-    if (data.wellCasingSize && data.wellCasingSize < 5) {
-      return {
-        isValid: false,
-        message: "Our pumps require a well casing of 5 inches or larger. Your well casing is too small for our pumps. Please contact us for assistance."
-      };
-    }
-    
-    // Select appropriate pump model
-    let selectedPump = null;
-    let pumpStages = 0;
-    
-    for (const [model, specs] of Object.entries(pumpData)) {
-      if (specs.maxFlow >= waterReq.requiredGPM && specs.maxHead >= tdh) {
-        // If this is the first suitable pump or has fewer stages than current selection
-        if (!selectedPump || specs.stages < pumpStages) {
-          selectedPump = model;
-          pumpStages = specs.stages;
+  // Otherwise calculate based on usage type
+  else {
+    switch(data.usageType) {
+      case USAGE_TYPES.LIVESTOCK:
+        // Parse livestock type
+        let type = 'beef'; // Default
+        
+        if (data.livestockType && data.livestockType.toLowerCase().includes('dairy')) {
+          type = 'dairy';
+        } else if (data.livestockType && data.livestockType.toLowerCase().includes('horse')) {
+          type = 'horses';
+        } else if (data.livestockType && data.livestockType.toLowerCase().includes('goat')) {
+          type = 'goats';
+        } else if (data.livestockType && data.livestockType.toLowerCase().includes('sheep')) {
+          type = 'sheep';
         }
-      }
+        
+        // Calculate for livestock
+        dailyGallons = livestockWaterNeeds[type].summer * (data.animalCount || 0);
+        break;
+        
+      case USAGE_TYPES.HOUSEHOLD:
+        // Calculate for household
+        dailyGallons = (data.peopleCount || 0) * householdWaterNeeds.person;
+        
+        // Add bathroom usage
+        if (data.bathroomCount) {
+          dailyGallons += data.bathroomCount * householdWaterNeeds.bathroom;
+        }
+        
+        // Add kitchen usage if mentioned
+        if (data.fixturesInfo && data.fixturesInfo.toLowerCase().includes('kitchen')) {
+          dailyGallons += householdWaterNeeds.kitchen;
+        }
+        
+        // Add laundry if mentioned
+        if (data.fixturesInfo && data.fixturesInfo.toLowerCase().includes('laundry')) {
+          dailyGallons += householdWaterNeeds.laundry;
+        }
+        
+        // Add garden if mentioned
+        if (data.fixturesInfo && data.fixturesInfo.toLowerCase().includes('garden')) {
+          if (data.fixturesInfo.toLowerCase().includes('large')) {
+            dailyGallons += householdWaterNeeds.garden_large;
+          } else if (data.fixturesInfo.toLowerCase().includes('medium')) {
+            dailyGallons += householdWaterNeeds.garden_medium;
+          } else {
+            dailyGallons += householdWaterNeeds.garden_small;
+          }
+        }
+        break;
+        
+      case USAGE_TYPES.IRRIGATION:
+        // Base calculation on irrigation method and area
+        let baseRate = irrigationWaterNeeds.sprinkler; // Default
+        
+        if (data.irrigationMethod === 'drip') {
+          baseRate = irrigationWaterNeeds.drip;
+        } else if (data.irrigationMethod === 'flood') {
+          baseRate = irrigationWaterNeeds.flood;
+        }
+        
+        // Apply crop type multiplier
+        let cropMultiplier = 1.0;
+        if (data.cropCategory === 'vegetables') {
+          cropMultiplier = irrigationWaterNeeds.vegetables;
+        } else if (data.cropCategory === 'fruits') {
+          cropMultiplier = irrigationWaterNeeds.fruits;
+        } else if (data.cropCategory === 'lawn') {
+          cropMultiplier = irrigationWaterNeeds.lawn;
+        }
+        
+        dailyGallons = baseRate * (data.irrigationArea || 1) * cropMultiplier;
+        break;
+        
+      default:
+        // Default to a reasonable value if we can't calculate
+        dailyGallons = 500;
     }
+  }
+  
+  // Default peak sun hours if not found in search
+  let peakSunHours = 5.4;
+  
+  // Calculate required GPM
+  requiredGPM = dailyGallons / (peakSunHours * 60);
+  
+  return {
+    dailyGallons,
+    requiredGPM,
+    peakSunHours
+  };
+}
+
+// Calculate pump recommendation
+function calculateRecommendation(data) {
+  // Calculate water requirements
+  const waterReq = calculateWaterRequirements(data);
+  
+  // Use custom head if provided
+  let tdh = data.customHead || 0;
+  
+  // If no custom head, calculate total dynamic head
+  if (!tdh) {
+    tdh = (data.staticWaterLevel || 0) + (data.drawdownLevel || 0) + (data.elevationGain || 0);
     
-    if (!selectedPump) {
-      return {
-        isValid: false,
-        message: "Based on your requirements, we don't have a standard pump that meets your needs. Please contact us directly for a custom solution."
-      };
+    // Add friction loss if pipe data exists
+    if (data.pipeLength && data.pipeSize) {
+      tdh += calculateFrictionLoss(waterReq.requiredGPM, data.pipeLength, data.pipeSize);
     }
-    
-    // Calculate solar power required
-    const powerRequired = pumpStages * 53; // 53 watts per stage
-    
-    // Calculate panels needed
-    const panelsNeeded = Math.ceil(powerRequired / 100);
-    // Make sure we have an even number for 48V systems
-    const adjustedPanels = panelsNeeded % 2 === 0 ? panelsNeeded : panelsNeeded + 1;
-    
-    // Calculate daily pump output
-    const pumpOutput = pumpData[selectedPump].maxFlow * (waterReq.peakSunHours * 60);
-    
-    // Create a clean, formatted summary text for easy copying
-    const formattedSummary = `
-  WATER SYSTEM SPECIFICATIONS
-  ===============================
-  Usage type: ${data.usageType.toUpperCase()}
-  ${data.usageType === USAGE_TYPES.LIVESTOCK ? 
-    `Livestock: ${data.animalCount} ${data.livestockType}` : 
-    data.usageType === USAGE_TYPES.HOUSEHOLD ? 
-      `Household: ${data.peopleCount} people, ${data.bathroomCount || 0} bathrooms` : 
-      data.usageType === USAGE_TYPES.IRRIGATION ? 
-        `Irrigation: ${data.irrigationArea} acres, ${data.irrigationMethod} system, ${data.cropType}` : 
-        `Custom requirements`}
+  }
   
-  WATER REQUIREMENTS
-  --------------------------------
-  Daily water needed: ${waterReq.dailyGallons.toFixed(0)} gallons
-  Required flow rate: ${waterReq.requiredGPM.toFixed(2)} GPM
-  Peak sun hours: ${waterReq.peakSunHours} hours
-  
-  WELL SPECIFICATIONS
-  --------------------------------
-  Well depth: ${data.wellDepth || 'Not specified'} feet
-  Static water level: ${data.staticWaterLevel || 'Not specified'} feet
-  Drawdown: ${data.drawdownLevel || 'Not specified'} feet ${data.drawdownEstimated ? '(estimated)' : ''}
-  Elevation gain: ${data.elevationGain || 'Not specified'} feet
-  Total Dynamic Head: ${tdh.toFixed(1)} feet
-  
-  PUMP RECOMMENDATION
-  ================================
-  Model: ${selectedPump}
-  Stages: ${pumpStages}
-  Max flow capacity: ${pumpData[selectedPump].maxFlow} GPM
-  Max head capacity: ${pumpData[selectedPump].maxHead} feet
-  Daily output: ${pumpOutput.toFixed(0)} gallons
-  
-  SOLAR CONFIGURATION
-  --------------------------------
-  System voltage: 48V
-  Total power required: ${powerRequired} watts
-  Recommended panels: ${adjustedPanels} x 100W panels (${adjustedPanels/2} series pairs)
-  `;
-    
+  // Check for sandy water
+  if (data.sandyWater) {
     return {
-      isValid: true,
-      waterRequirements: {
-        dailyGallons: waterReq.dailyGallons,
-        requiredGPM: waterReq.requiredGPM.toFixed(2)
-      },
-      pumpDetails: {
-        model: selectedPump,
-        stages: pumpStages,
-        maxFlow: pumpData[selectedPump].maxFlow,
-        maxHead: pumpData[selectedPump].maxHead
-      },
-      system: {
-        tdh: tdh.toFixed(1),
-        peakSunHours: waterReq.peakSunHours,
-        panelsRequired: adjustedPanels,
-        dailyOutput: pumpOutput.toFixed(0)
-      },
-      solarConfig: {
-        voltage: 48,
-        wattage: adjustedPanels * 100,
-        description: `${adjustedPanels} panels (${adjustedPanels/2} series pairs of 24V/100W panels)`
-      },
-      formattedSummary
+      isValid: false,
+      message: "Your water has too much sand for our solar pumps. You might want to consider contacting us directly for alternatives."
     };
   }
   
-  // Debug endpoint to check session data
-  app.get('/api/debug/:sessionId', (req, res) => {
-    const { sessionId } = req.params;
-    if (sessions[sessionId]) {
-      res.json({
-        currentStage: sessions[sessionId].currentStage,
-        data: sessions[sessionId].data,
-        messageCount: sessions[sessionId].messages.length
-      });
-    } else {
-      res.json({ error: "Session not found" });
+  // Check well casing size
+  if (data.wellCasingSize && data.wellCasingSize < 5) {
+    return {
+      isValid: false,
+      message: "Our pumps require a well casing of 5 inches or larger. Your well casing is too small for our pumps. Please contact us for assistance."
+    };
+  }
+  
+  // Select appropriate pump model
+  let selectedPump = null;
+  let pumpStages = 0;
+  
+  for (const [model, specs] of Object.entries(pumpData)) {
+    if (specs.maxFlow >= waterReq.requiredGPM && specs.maxHead >= tdh) {
+      // If this is the first suitable pump or has fewer stages than current selection
+      if (!selectedPump || specs.stages < pumpStages) {
+        selectedPump = model;
+        pumpStages = specs.stages;
+      }
     }
-  });
+  }
   
-  // Test endpoint - Keep this exact format which we know works
-  app.get('/', (req, res) => {
-    res.send('Solar Pump Chatbot API is running - Test Version');
-  });
+  if (!selectedPump) {
+    return {
+      isValid: false,
+      message: "Based on your requirements, we don't have a standard pump that meets your needs. Please contact us directly for a custom solution."
+    };
+  }
   
-  // Start the server
-  const PORT = process.env.PORT || 3000;
-  app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-  });
+  // Calculate solar power required
+  const powerRequired = pumpStages * 53; // 53 watts per stage
+  
+  // Calculate panels needed
+  const panelsNeeded = Math.ceil(powerRequired / 100);
+  // Make sure we have an even number for 48V systems
+  const adjustedPanels = panelsNeeded % 2 === 0 ? panelsNeeded : panelsNeeded + 1;
+  
+  // Calculate daily pump output
+  const pumpOutput = pumpData[selectedPump].maxFlow * (waterReq.peakSunHours * 60);
+  
+  // Create a clean, formatted summary text for easy copying
+  const formattedSummary = `
+WATER SYSTEM SPECIFICATIONS
+===============================
+Usage type: ${data.usageType.toUpperCase()}
+${data.usageType === USAGE_TYPES.LIVESTOCK ? 
+  `Livestock: ${data.animalCount} ${data.livestockType}` : 
+  data.usageType === USAGE_TYPES.HOUSEHOLD ? 
+    `Household: ${data.peopleCount} people, ${data.bathroomCount || 0} bathrooms` : 
+    data.usageType === USAGE_TYPES.IRRIGATION ? 
+      `Irrigation: ${data.irrigationArea} acres, ${data.irrigationMethod} system, ${data.cropType}` : 
+      `Custom requirements`}
+
+WATER REQUIREMENTS
+--------------------------------
+Daily water needed: ${waterReq.dailyGallons.toFixed(0)} gallons
+Required flow rate: ${waterReq.requiredGPM.toFixed(2)} GPM
+Peak sun hours: ${waterReq.peakSunHours} hours
+
+WELL SPECIFICATIONS
+--------------------------------
+Well depth: ${data.wellDepth || 'Not specified'} feet
+Static water level: ${data.staticWaterLevel || 'Not specified'} feet
+Drawdown: ${data.drawdownLevel || 'Not specified'} feet ${data.drawdownEstimated ? '(estimated)' : ''}
+Elevation gain: ${data.elevationGain || 'Not specified'} feet
+Total Dynamic Head: ${tdh.toFixed(1)} feet
+
+PUMP RECOMMENDATION
+================================
+Model: ${selectedPump}
+Stages: ${pumpStages}
+Max flow capacity: ${pumpData[selectedPump].maxFlow} GPM
+Max head capacity: ${pumpData[selectedPump].maxHead} feet
+Daily output: ${pumpOutput.toFixed(0)} gallons
+
+SOLAR CONFIGURATION
+--------------------------------
+System voltage: 48V
+Total power required: ${powerRequired} watts
+Recommended panels: ${adjustedPanels} x 100W panels (${adjustedPanels/2} series pairs)
+`;
+  
+  return {
+    isValid: true,
+    waterRequirements: {
+      dailyGallons: waterReq.dailyGallons,
+      requiredGPM: waterReq.requiredGPM.toFixed(2)
+    },
+    pumpDetails: {
+      model: selectedPump,
+      stages: pumpStages,
+      maxFlow: pumpData[selectedPump].maxFlow,
+      maxHead: pumpData[selectedPump].maxHead
+    },
+    system: {
+      tdh: tdh.toFixed(1),
+      peakSunHours: waterReq.peakSunHours,
+      panelsRequired: adjustedPanels,
+      dailyOutput: pumpOutput.toFixed(0)
+    },
+    solarConfig: {
+      voltage: 48,
+      wattage: adjustedPanels * 100,
+      description: `${adjustedPanels} panels (${adjustedPanels/2} series pairs of 24V/100W panels)`
+    },
+    formattedSummary
+  };
+}
+
+// Debug endpoint to check session data
+app.get('/api/debug/:sessionId', (req, res) => {
+  const { sessionId } = req.params;
+  if (sessions[sessionId]) {
+    res.json({
+      currentStage: sessions[sessionId].currentStage,
+      data: sessions[sessionId].data,
+      messageCount: sessions[sessionId].messages.length
+    });
+  } else {
+    res.json({ error: "Session not found" });
+  }
+});
+
+// Test endpoint - Keep this exact format which we know works
+app.get('/', (req, res) => {
+  res.send('Solar Pump Chatbot API is running - Test Version');
+});
+
+// Start the server
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
