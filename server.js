@@ -397,7 +397,7 @@ app.post('/api/chat', async (req, res) => {
         // This is where we set the OpenAI model to use
         // You can change this to any available OpenAI model
         const response = await openai.chat.completions.create({
-          model: "gpt-4o-mini", // Using the GPT-4o-mini model for better cost efficiency
+          model: "gpt-3.5-turbo", // Fallback to a more reliable model
           messages: [
             { role: "system", content: systemPrompt },
             ...session.messages,
@@ -405,7 +405,8 @@ app.post('/api/chat', async (req, res) => {
             ...(additionalInfo ? [{ role: "system", content: additionalInfo }] : []),
           ],
           temperature: 0.7, // Add some variability to the responses
-          max_tokens: 1000 // Limit token usage
+          max_tokens: 1000, // Limit token usage
+          request_timeout: 15000 // 15 second timeout
         });
         
         assistantMessage = response.choices[0].message.content;
@@ -414,8 +415,22 @@ app.post('/api/chat', async (req, res) => {
         retryCount++;
         console.error(`OpenAI API error (attempt ${retryCount}/${maxRetries}):`, error.message);
         
+        // If we have a token limit error, try with a smaller context
+        if (error.message && error.message.includes('token')) {
+          console.log('Token limit exceeded, reducing context size for next attempt');
+          // Reduce message history to just the last few exchanges
+          session.messages = session.messages.slice(-6);
+          // Simplify additional info if it exists
+          if (additionalInfo.length > 1000) {
+            additionalInfo = additionalInfo.substring(0, 1000) + '...';
+          }
+        }
+        
         if (retryCount >= maxRetries) {
-          throw new Error('Failed to generate response after multiple attempts');
+          // Instead of throwing, provide a fallback response
+          assistantMessage = "Howdy partner! Looks like my telegraph wire's down at the moment. " +
+            "Can you try again in a minute or two? I promise I'll be ready to help you pick the perfect pump for your needs.";
+          break;
         }
         
         // Wait before retrying (exponential backoff)
@@ -442,10 +457,18 @@ app.post('/api/chat', async (req, res) => {
     
   } catch (error) {
     console.error('Error processing chat request:', error);
+    
+    // Send a user-friendly error response
     res.status(500).json({ 
+      message: "Looks like we've hit a technical snag. Mind trying again in a minute?",
       error: 'An error occurred while processing your request', 
       details: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
+    
+    // If this is a critical error, log additional details for debugging
+    if (error.stack) {
+      console.error('Error stack:', error.stack);
+    }
   }
 });
 
