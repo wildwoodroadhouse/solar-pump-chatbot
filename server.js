@@ -20,8 +20,8 @@ const corsOptions = {
     allowedHeaders: ['Content-Type']
   };
   
-  app.use(cors(corsOptions));
-  app.use(express.json());
+app.use(cors(corsOptions));
+app.use(express.json());
 
 // Initialize OpenAI client
 const openai = new OpenAI({
@@ -59,8 +59,39 @@ const STAGES = {
   RECOMMENDATION: 'recommendation'
 };
 
-// Store active sessions
-const sessions = {};
+// Improved session management with TTL
+const SESSION_TTL = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
+let sessions = {};
+
+// Session cleanup function to prevent memory leaks
+function cleanupSessions() {
+  const now = Date.now();
+  for (const [sessionId, session] of Object.entries(sessions)) {
+    if (session.lastAccessed && now - session.lastAccessed > SESSION_TTL) {
+      delete sessions[sessionId];
+    }
+  }
+}
+
+// Run cleanup every hour
+setInterval(cleanupSessions, 60 * 60 * 1000);
+
+// Get or create session with timestamp
+function getOrCreateSession(sessionId) {
+  if (!sessions[sessionId]) {
+    sessions[sessionId] = {
+      messages: [],
+      data: {},
+      currentStage: STAGES.GREETING,
+      lastAccessed: Date.now()
+    };
+  } else {
+    // Update last accessed time
+    sessions[sessionId].lastAccessed = Date.now();
+  }
+  
+  return sessions[sessionId];
+}
 
 // System prompt that defines chatbot personality and behavior
 const systemPrompt = `
@@ -106,16 +137,12 @@ app.post('/api/chat', async (req, res) => {
   try {
     const { message, sessionId } = req.body;
     
-    // Create or retrieve session
-    if (!sessions[sessionId]) {
-      sessions[sessionId] = {
-        messages: [],
-        data: {},
-        currentStage: STAGES.GREETING
-      };
+    if (!sessionId) {
+      return res.status(400).json({ error: 'Session ID is required' });
     }
     
-    const session = sessions[sessionId];
+    // Get or create session with timestamp refresh
+    const session = getOrCreateSession(sessionId);
     
     // Add user message to history
     session.messages.push({ role: 'user', content: message });
@@ -180,12 +207,13 @@ app.post('/api/chat', async (req, res) => {
     res.json({ 
       message: assistantMessage,
       stage: session.currentStage,
-      sessionId: sessionId
+      sessionId: sessionId,
+      recommendation: session.currentStage === STAGES.RECOMMENDATION ? session.data.recommendation : null
     });
     
   } catch (error) {
     console.error('Error:', error);
-    res.status(500).json({ error: 'An error occurred' });
+    res.status(500).json({ error: 'An error occurred', details: error.message });
   }
 });
 
@@ -488,6 +516,20 @@ function calculateRecommendation(data) {
     }
   };
 }
+
+// Debug endpoint to check session data
+app.get('/api/debug/:sessionId', (req, res) => {
+  const { sessionId } = req.params;
+  if (sessions[sessionId]) {
+    res.json({
+      currentStage: sessions[sessionId].currentStage,
+      data: sessions[sessionId].data,
+      messageCount: sessions[sessionId].messages.length
+    });
+  } else {
+    res.json({ error: "Session not found" });
+  }
+});
 
 // Test endpoint - Keep this exact format which we know works
 app.get('/', (req, res) => {
