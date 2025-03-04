@@ -257,7 +257,7 @@ app.post('/api/chat', async (req, res) => {
     
     // Generate response
     const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini", // More cost-effective option
+      model: "gpt-3.5-turbo", // Use standard model until we confirm this works
       messages: [
         { role: "system", content: systemPrompt },
         ...session.messages,
@@ -752,18 +752,14 @@ async function searchPumpInformation(query) {
     console.error('Google search error:', error);
     return null;
   }
-}
-
-// Calculate friction loss for pipe
+}// Calculate friction loss for pipe
 function calculateFrictionLoss(flowRate, pipeLength, pipeSize) {
-  // Simplified friction loss calculation
-  const frictionFactor = 0.02; // Example factor, would vary by pipe material
-  return frictionFactor * (pipeLength / pipeSize) * (flowRate * flowRate);
-}
-
-// Calculate total water requirements
-function calculateWaterRequirements(data) {
-  let dailyGallons =// Calculate total water requirements
+    // Simplified friction loss calculation
+    const frictionFactor = 0.02; // Example factor, would vary by pipe material
+    return frictionFactor * (pipeLength / pipeSize) * (flowRate * flowRate);
+  }
+  
+  // Calculate total water requirements
   function calculateWaterRequirements(data) {
     let dailyGallons = 0;
     let requiredGPM = 0;
