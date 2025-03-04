@@ -13,9 +13,15 @@ const pumpData = require('./pumpData');
 // Create Express app
 const app = express();
 
-// Enable CORS and JSON parsing
-app.use(cors());
-app.use(express.json());
+// Enable CORS with specific options
+const corsOptions = {
+    origin: '*', // For testing, allows all origins
+    methods: ['GET', 'POST'],
+    allowedHeaders: ['Content-Type']
+  };
+  
+  app.use(cors(corsOptions));
+  app.use(express.json());
 
 // Initialize OpenAI client
 const openai = new OpenAI({
